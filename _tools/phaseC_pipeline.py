@@ -293,15 +293,18 @@ def tail_needs_sanitize(tail: bytes) -> bool:
 
 
 def sanitize_loc_file(upk: Path) -> int:
+    """Wipe dirty Bulk headers on any 112-byte SoundNodeWave tail.
+
+    Not limited to narrative leaves: shop/broadcast (SAL_*/LOG_Vending) stubs
+    can keep size>0 ofiles after package shrink; those OOB pointers can prevent
+    DLC hub maps (e.g. T-Bone Junction) from loading.
+    """
     data = bytearray(upk.read_bytes())
     pkg = load_package(data)
     names = names_from_pkg(pkg)
     n = 0
     for e in pkg.exports:
         if e.serial_size < 200:
-            continue
-        leaf = export_leaf(pkg, e)
-        if not is_narrative_leaf(leaf):
             continue
         try:
             serial = parse_soundnode_serial(
