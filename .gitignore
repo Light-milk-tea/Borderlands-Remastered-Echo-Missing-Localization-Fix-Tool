@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+_knoxx_echo_backup/
+*.zip
+.DS_Store
+Thumbs.db
