@@ -49,7 +49,9 @@ def export_leaf(pkg, e) -> str:
     return f"{base}_{e.name_number - 1}" if e.name_number > 0 else base
 
 
-def hollow_serial(blob: bytes, names: list[str]) -> tuple[bytes | None, dict]:
+def hollow_serial(
+    blob: bytes, names: list[str], *, wipe_bulk: bool = True
+) -> tuple[bytes | None, dict]:
     info: dict = {}
     try:
         serial = parse_soundnode_serial(blob, names)
@@ -64,11 +66,12 @@ def hollow_serial(blob: bytes, names: list[str]) -> tuple[bytes | None, dict]:
     if not dropped:
         info["error"] = "no_subtitle_props"
         return None, info
-    # Wipe leftover fat Bulk headers (size>0 pointing at VO/OOB audio). Keeping
-    # those stubs after dropping Subtitles can cut Echo audio mid-line while the
-    # portrait/Duration keeps running.
+    # Wipe leftover fat Bulk headers (size>0 pointing at VO/OOB audio) on short
+    # stub tails only. NEVER wipe when the tail still holds inline Ogg — that
+    # yields Serial size mismatch / map crash (e.g. NAR_Echo_Zed_24).
+    # SAL proximity lines also keep bulk (no VO fallback when empty).
     tail = serial.tail
-    if len(tail) >= 16:
+    if wipe_bulk and len(tail) >= 16 and b"OggS" not in tail and len(tail) <= 128:
         import struct as _struct
 
         clean = bytearray(tail)
@@ -80,6 +83,7 @@ def hollow_serial(blob: bytes, names: list[str]) -> tuple[bytes | None, dict]:
                 # still adjust OffsetInFile for package geometry)
                 _struct.pack_into("<4i", clean, i, 0, 0, 0, ofile)
         tail = bytes(clean)
+    info["wipe_bulk"] = wipe_bulk
     hollow = ExportSerial(
         net_index=serial.net_index,
         props=keep,
@@ -140,7 +144,9 @@ def hollow_package(
         if max_tail is not None and len(probe.tail) > max_tail:
             skipped["tail_too_big"] += 1
             continue
-        new_blob, info = hollow_serial(blob, names)
+        u = leaf.upper()
+        wipe_bulk = not (u.startswith("SAL_") or "_SAL_" in u)
+        new_blob, info = hollow_serial(blob, names, wipe_bulk=wipe_bulk)
         if new_blob is None:
             if info.get("error") == "no_subtitle_props":
                 skipped["no_subs"] += 1

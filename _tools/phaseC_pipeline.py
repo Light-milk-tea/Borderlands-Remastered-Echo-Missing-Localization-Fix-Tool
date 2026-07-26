@@ -5,10 +5,11 @@
 
 步骤：
   1) 备份将改动的 UPK / .int
-  2) LOC 空壳化（Echo/Live/Com，短尾，排除战斗语音）
-  3) 清洗 LOC Bulk 脏尾
-  4) VO 叙事对象去掉 LocalizedSubtitles（缺 Subtitles 时先从槽 0 提升）
-  5) 可选：加强天邈 .int 键名
+  2) LOC 空壳化（Echo/Live/Com/SAL 靠近台词；排除战斗 BD/BTLD）
+  3) 清洗 LOC Bulk 脏尾（仅 OOB 或非空壳 size=0；保留包内有效音频）
+  4) 将 VO 的 Ogg 嵌入 LOC 的 SAL 靠近台词（SAL 不会像 Echo 那样回退 VO）
+  5) VO 叙事对象去掉 LocalizedSubtitles（缺 Subtitles 时先从槽 0 提升）
+  6) 可选：加强天邈 .int 键名
 
   python _tools/phaseC_pipeline.py --game "C:\\...\\BorderlandsGOTYEnhanced"
 """
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from phaseC_embed_sal_loc_audio import embed_all_loc
 from phaseC_hollow_loc import hollow_package
 from ue3_props import (
     ExportSerial,
@@ -63,6 +65,10 @@ VO_INT_PAIRS = [
     ("DLC3/Packages/Audio/VO/DLC3_VO_Athena_WAV.upk", "dlc3_vo_athena_wav.int"),
     ("DLC3/Packages/Audio/VO/DLC3_VO_Moxxi_WAV.upk", "dlc3_vo_moxxi_wav.int"),
     ("DLC4/Packages/Audio/VO/DLC4_VO_Narrative_wav.upk", "dlc4_vo_narrative_wav.int"),
+    # DLC4 靠近/闲聊（塔尔塔洛斯坦尼斯等）；地图 LOC 空壳后需 VO 去槽 + .int
+    ("DLC4/Packages/Audio/VO/DLC4_SAL_Tannis_WAV.upk", "dlc4_SAL_tannis_wav.int"),
+    ("DLC4/Packages/Audio/VO/DLC4_SAL_Marcus_WAV.upk", "dlc4_SAL_marcus_wav.int"),
+    ("DLC4/Packages/Audio/VO/DLC4_SAL_Blake_WAV.upk", "dlc4_SAL_blake_wav.int"),
 ]
 
 _SECTION_RE = re.compile(
@@ -118,6 +124,7 @@ class PipelineResult:
     backup_dir: Path | None = None
     loc_hollowed: int = 0
     loc_sanitized: int = 0
+    sal_embedded: int = 0
     vo_stripped: int = 0
     int_boosted: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -139,6 +146,9 @@ def is_narrative_leaf(leaf: str) -> bool:
     u = leaf.upper()
     if any(x in u for x in ("_BD_", "BTLD", "LOG_VENDING", "CROWD_LIVE")):
         return False
+    # SAL_ = 靠近/闲聊（如 SAL_Tannis_Live_2a、DLC4_SAL_Tannis_Live_*）
+    if u.startswith("SAL_") or "_SAL_" in u:
+        return True
     return any(
         x in u
         for x in (
@@ -281,23 +291,37 @@ def make_empty_tail(serial_off: int, props_end: int) -> bytes:
     return bytes(out)
 
 
-def tail_needs_sanitize(tail: bytes) -> bool:
+def tail_needs_sanitize(tail: bytes, file_len: int, serial_off: int, props_end: int) -> bool:
+    """True when Bulk claims are OOB, or size=0 stubs are not the empty-shell pattern.
+
+    Critical: do NOT wipe size>0 payloads that still lie inside the package.
+    Over-wiping those (e.g. DLC4 SAL proximity lines) leaves Duration-only LOC
+    stubs: mouth moves, no audio/subtitles, and no VO fallback.
+    """
     if len(tail) < HDR:
         return False
     max_bytes = min(len(tail), N_HDR * HDR)
+    has_payload = False
     for i in range(0, max_bytes, HDR):
-        _flags, count, size, _off = struct.unpack_from("<4i", tail, i)
-        if size > 0 or count > 0:
-            return True
-    return False
+        _flags, count, size, ofile = struct.unpack_from("<4i", tail, i)
+        payload = max(size, count)
+        if payload > 0:
+            has_payload = True
+            if ofile < 0 or ofile + payload > file_len:
+                return True
+    if has_payload:
+        # In-range audio/bulk — keep (hub load fix only needed for OOB).
+        return False
+    expected = make_empty_tail(serial_off, props_end)
+    return tail[:max_bytes] != expected[:max_bytes]
 
 
 def sanitize_loc_file(upk: Path) -> int:
-    """Wipe dirty Bulk headers on any 112-byte SoundNodeWave tail.
+    """Repair dirty 112-byte SoundNodeWave Bulk tails (OOB or non-empty-shell).
 
-    Not limited to narrative leaves: shop/broadcast (SAL_*/LOG_Vending) stubs
-    can keep size>0 ofiles after package shrink; those OOB pointers can prevent
-    DLC hub maps (e.g. T-Bone Junction) from loading.
+    Not limited to narrative leaves: shop/broadcast stubs with OOB ofiles after
+    package shrink can prevent DLC hub maps (e.g. T-Bone Junction) from loading.
+    In-range size>0 payloads are preserved so SAL proximity VO is not silenced.
     """
     data = bytearray(upk.read_bytes())
     pkg = load_package(data)
@@ -315,7 +339,9 @@ def sanitize_loc_file(upk: Path) -> int:
             continue
         if len(serial.tail) != N_HDR * HDR:
             continue
-        if not tail_needs_sanitize(serial.tail):
+        if not tail_needs_sanitize(
+            serial.tail, len(pkg.data), e.serial_offset, serial.props_end
+        ):
             continue
         new_tail = make_empty_tail(e.serial_offset, serial.props_end)
         lo = e.serial_offset + serial.props_end
@@ -563,14 +589,15 @@ def run_pipeline(
         )
         for upk in loc_list:
             _backup_file(upk, backup_dir / "CookedPC_full", paths.cooked, None)
-            # 叙事对象一律去字幕属性；长尾（LOC 内嵌音频）也去字、保留音频尾。
-            # 战斗 BD/BTLD 已被 is_narrative_leaf 排除，不再用 max_tail 误伤 Zed 等。
+            # 叙事对象去字幕；尾部 >128 的是 LOC 内嵌音频（如 NAR_Echo_Zed_24），
+            # 必须跳过——空壳会清掉 Bulk 头导致 Serial size mismatch 闪退。
+            # 战斗 BD/BTLD 已被 is_narrative_leaf 排除。
             r = hollow_package(
                 upk,
                 apply=True,
                 backup_dir=loc_bak,
                 only=None,
-                max_tail=None,
+                max_tail=MAX_TAIL,
                 leaf_pred=is_narrative_leaf,
             )
             if r["patched"]:
@@ -590,7 +617,7 @@ def run_pipeline(
 
         # ----- 2) sanitize tails -----
         _log(log, "")
-        _log(log, "======== 2/4 清洗 LOC Bulk 尾 ========")
+        _log(log, "======== 2/5 清洗 LOC Bulk 尾 ========")
         for upk in loc_list:
             n = sanitize_loc_file(upk)
             if n:
@@ -598,9 +625,16 @@ def run_pipeline(
                 result.loc_sanitized += n
         _log(log, f"LOC 清洗合计: {result.loc_sanitized}")
 
-        # ----- 3) VO strip -----
+        # ----- 3) embed SAL audio into LOC -----
         _log(log, "")
-        _log(log, "======== 3/4 VO 去掉 LocalizedSubtitles ========")
+        _log(log, "======== 3/5 嵌入 SAL 靠近台词音频到 LOC ========")
+        result.sal_embedded = embed_all_loc(
+            paths.cooked, loc_list, log=lambda m: _log(log, m)
+        )
+
+        # ----- 4) VO strip -----
+        _log(log, "")
+        _log(log, "======== 4/5 VO 去掉 LocalizedSubtitles ========")
         for rel, _int_name in VO_INT_PAIRS:
             upk = paths.cooked.joinpath(*rel.split("/"))
             if not upk.is_file():
@@ -612,10 +646,10 @@ def run_pipeline(
             result.vo_stripped += r["patched"]
         _log(log, f"VO 去槽合计: {result.vo_stripped}")
 
-        # ----- 4) int boost -----
+        # ----- 5) int boost -----
         if boost_int:
             _log(log, "")
-            _log(log, "======== 4/4 加强 .int 键名 ========")
+            _log(log, "======== 5/5 加强 .int 键名 ========")
             for rel, int_name in VO_INT_PAIRS:
                 ip = paths.int_dir / int_name
                 if not ip.is_file():
@@ -636,7 +670,8 @@ def run_pipeline(
         result.ok = True
         result.message = (
             f"完成。LOC空壳 {result.loc_hollowed}，Bulk清洗 {result.loc_sanitized}，"
-            f"VO去槽 {result.vo_stripped}，.int加强 {result.int_boosted} 个文件。\n"
+            f"SAL嵌入 {result.sal_embedded}，VO去槽 {result.vo_stripped}，"
+            f".int加强 {result.int_boosted} 个文件。\n"
             f"备份: {backup_dir}\n"
             "请完全退出后重进游戏测试。勿点 Steam「验证游戏文件」。"
         )
