@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 _knoxx_echo_backup/
 *.zip
+!Echo_CN_Fix_Tool_Portable/**/*.zip
 .DS_Store
 Thumbs.db
