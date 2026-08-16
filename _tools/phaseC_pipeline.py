@@ -48,6 +48,7 @@ def _app_root() -> Path:
 
 ROOT = _app_root()
 LogFn = Callable[[str], None]
+ORIGINALS_NAME = "_originals"
 
 DLC_IDS = ("DLC1", "DLC3", "DLC4")
 FOREIGN = ("_deu.upk", "_esn.upk", "_fra.upk", "_ita.upk", "_jpn.upk")
@@ -127,7 +128,43 @@ class PipelineResult:
     sal_embedded: int = 0
     vo_stripped: int = 0
     int_boosted: int = 0
+    restored_upk: int = 0
+    restored_int: int = 0
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BackupInfo:
+    path: Path
+    stamp: str
+    label: str
+    upk_count: int
+    int_count: int
+    is_originals: bool = False
+
+
+def default_backup_parent() -> Path:
+    return ROOT / "_knoxx_echo_backup" / "phaseC_gui"
+
+
+def candidate_backup_parents() -> list[Path]:
+    """Look next to the exe and in the project/portable folders."""
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for p in (
+        ROOT / "_knoxx_echo_backup" / "phaseC_gui",
+        ROOT / "Echo_CN_Fix_Tool_Portable" / "_knoxx_echo_backup" / "phaseC_gui",
+        ROOT.parent / "_knoxx_echo_backup" / "phaseC_gui",
+    ):
+        try:
+            key = p.resolve()
+        except OSError:
+            key = p
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
 
 
 def _log(log: LogFn | None, msg: str) -> None:
@@ -281,6 +318,179 @@ def _backup_file(src: Path, backup_root: Path, cooked: Path | None, int_dir: Pat
     if not dest.exists():
         shutil.copy2(src, dest)
     return dest
+
+
+def _cooked_backup_root(backup_dir: Path) -> Path | None:
+    nested = backup_dir / "CookedPC_full" / "CookedPC"
+    if nested.is_dir():
+        return nested
+    flat = backup_dir / "CookedPC_full"
+    if flat.is_dir():
+        return flat
+    return None
+
+
+def _iter_backup_upks(backup_dir: Path) -> list[tuple[Path, Path]]:
+    root = _cooked_backup_root(backup_dir)
+    if root is None:
+        return []
+    out: list[tuple[Path, Path]] = []
+    for src in root.rglob("*"):
+        if src.is_file() and src.suffix.lower() == ".upk":
+            out.append((src, src.relative_to(root)))
+    return out
+
+
+def _iter_backup_ints(backup_dir: Path) -> list[Path]:
+    folder = backup_dir / "Localization_INT"
+    if not folder.is_dir():
+        return []
+    return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".int"]
+
+
+def backup_file_counts(backup_dir: Path) -> tuple[int, int]:
+    return len(_iter_backup_upks(backup_dir)), len(_iter_backup_ints(backup_dir))
+
+
+def backup_has_files(backup_dir: Path) -> bool:
+    upk_n, int_n = backup_file_counts(backup_dir)
+    return upk_n > 0 or int_n > 0
+
+
+def _format_backup_stamp(name: str) -> str:
+    try:
+        return datetime.strptime(name, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return name
+
+
+def describe_backup(backup_dir: Path, *, is_originals: bool = False) -> BackupInfo:
+    upk_n, int_n = backup_file_counts(backup_dir)
+    if is_originals:
+        stamp = "首次修复前原件"
+        label = f"首次修复前原件（UPK {upk_n}，.int {int_n}）"
+    else:
+        stamp = _format_backup_stamp(backup_dir.name)
+        label = f"{stamp}（UPK {upk_n}，.int {int_n}）"
+    return BackupInfo(
+        path=backup_dir,
+        stamp=stamp,
+        label=label,
+        upk_count=upk_n,
+        int_count=int_n,
+        is_originals=is_originals,
+    )
+
+
+def list_backups(backup_parent: Path | None = None) -> list[BackupInfo]:
+    """Timestamped run folders, oldest first (first run is usually pre-patch)."""
+    parents = [backup_parent] if backup_parent is not None else candidate_backup_parents()
+    found: list[Path] = []
+    for parent in parents:
+        if not parent.is_dir():
+            continue
+        for p in parent.iterdir():
+            if p.is_dir() and not p.name.startswith("_") and backup_has_files(p):
+                found.append(p)
+    found.sort(key=lambda p: p.name)
+    return [describe_backup(p) for p in found]
+
+
+def resolve_restore_source(backup_parent: Path | None = None) -> BackupInfo | None:
+    """Prefer persistent first-run originals; else the oldest timestamped backup."""
+    parents = [backup_parent] if backup_parent is not None else candidate_backup_parents()
+    for parent in parents:
+        originals = parent / ORIGINALS_NAME
+        if backup_has_files(originals):
+            return describe_backup(originals, is_originals=True)
+    backups = list_backups(backup_parent)
+    return backups[0] if backups else None
+
+
+def _probe_writable(paths: GamePaths) -> None:
+    probe = paths.cooked / "DLC3" / "Maps"
+    if not probe.is_dir():
+        probe = paths.cooked
+    for p in probe.rglob("*_LOC_INT.upk"):
+        try:
+            with open(p, "r+b"):
+                pass
+        except PermissionError as ex:
+            raise PermissionError(
+                f"无法写入 {p.name}（游戏可能仍在运行，请完全退出后再试）"
+            ) from ex
+        break
+
+
+def restore_from_backup(
+    game_path: str | Path,
+    backup_dir: Path | None = None,
+    *,
+    backup_parent: Path | None = None,
+    log: LogFn | None = None,
+) -> PipelineResult:
+    """Copy backed-up UPK / .int over the patched game files. Nothing is deleted."""
+    result = PipelineResult()
+    try:
+        paths = GamePaths.resolve(game_path)
+        parent = backup_parent or default_backup_parent()
+        if backup_dir is not None:
+            info = describe_backup(
+                backup_dir,
+                is_originals=backup_dir.name == ORIGINALS_NAME,
+            )
+        else:
+            info = resolve_restore_source(backup_parent)
+        if info is None or not backup_has_files(info.path):
+            raise FileNotFoundError(
+                "没有找到可还原的备份。\n"
+                f"请确认存在：{parent}\\{ORIGINALS_NAME} 或带时间戳的备份文件夹。"
+            )
+        result.backup_dir = info.path
+        _log(log, f"游戏根目录: {paths.game_root}")
+        _log(log, f"还原来源: {info.label}")
+        _log(log, f"备份路径: {info.path}")
+        _probe_writable(paths)
+
+        upks = _iter_backup_upks(info.path)
+        ints = _iter_backup_ints(info.path)
+        if not upks and not ints:
+            raise FileNotFoundError(f"备份是空的: {info.path}")
+
+        _log(log, "")
+        _log(log, "======== 还原 CookedPC UPK ========")
+        for src, rel in upks:
+            dest = paths.cooked / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            result.restored_upk += 1
+            _log(log, f"  {rel}")
+
+        _log(log, "")
+        _log(log, "======== 还原 Localization .int ========")
+        if not ints:
+            _log(log, "  （这份备份没有 .int，多半当时没勾选加强键名）")
+        for src in ints:
+            dest = paths.int_dir / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            result.restored_int += 1
+            _log(log, f"  {src.name}")
+
+        result.ok = True
+        result.message = (
+            f"已还原。UPK {result.restored_upk} 个，.int {result.restored_int} 个。\n"
+            f"来源: {info.path}\n"
+            "请完全退出后重进游戏。DLC Echo 会回到修复前的状态。"
+        )
+        _log(log, "")
+        _log(log, result.message)
+        return result
+    except Exception as ex:
+        result.ok = False
+        result.message = f"还原失败: {ex}"
+        _log(log, result.message)
+        return result
 
 
 def make_empty_tail(serial_off: int, props_end: int) -> bytes:
@@ -556,26 +766,22 @@ def run_pipeline(
     try:
         paths = GamePaths.resolve(game_path)
         check_game(paths, log)
-
-        # writability probe
-        probe = paths.cooked / "DLC3" / "Maps"
-        if probe.is_dir():
-            for p in probe.glob("*_LOC_INT.upk"):
-                try:
-                    with open(p, "r+b"):
-                        pass
-                except PermissionError as ex:
-                    raise PermissionError(
-                        f"无法写入 {p.name}（游戏可能仍在运行，请完全退出后再试）"
-                    ) from ex
-                break
+        _probe_writable(paths)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_parent = backup_parent or (ROOT / "_knoxx_echo_backup" / "phaseC_gui")
+        backup_parent = backup_parent or default_backup_parent()
+        originals_dir = backup_parent / ORIGINALS_NAME
+        # Only snapshot "originals" on the very first fix. Later runs would
+        # otherwise overwrite that folder with already-patched files.
+        seed_originals = not backup_has_files(originals_dir) and not list_backups(
+            backup_parent
+        )
         backup_dir = backup_parent / stamp
         backup_dir.mkdir(parents=True, exist_ok=True)
         result.backup_dir = backup_dir
         _log(log, f"备份目录: {backup_dir}")
+        if seed_originals:
+            _log(log, f"同时留下首次原件: {originals_dir}")
 
         # ----- 1) LOC hollow -----
         _log(log, "")
@@ -589,6 +795,8 @@ def run_pipeline(
         )
         for upk in loc_list:
             _backup_file(upk, backup_dir / "CookedPC_full", paths.cooked, None)
+            if seed_originals:
+                _backup_file(upk, originals_dir / "CookedPC_full", paths.cooked, None)
             # 叙事对象去字幕；尾部 >128 的是 LOC 内嵌音频（如 NAR_Echo_Zed_24），
             # 必须跳过——空壳会清掉 Bulk 头导致 Serial size mismatch 闪退。
             # 战斗 BD/BTLD 已被 is_narrative_leaf 排除。
@@ -641,6 +849,8 @@ def run_pipeline(
                 _log(log, f"  跳过（不存在）: {rel}")
                 continue
             _backup_file(upk, backup_dir / "CookedPC_full", paths.cooked, None)
+            if seed_originals:
+                _backup_file(upk, originals_dir / "CookedPC_full", paths.cooked, None)
             r = strip_vo_file(upk)
             _log(log, f"  {upk.name}: stripped={r['patched']}")
             result.vo_stripped += r["patched"]
@@ -656,6 +866,8 @@ def run_pipeline(
                     _log(log, f"  跳过（无 .int）: {int_name}")
                     continue
                 stem = Path(rel).stem
+                if seed_originals:
+                    _backup_file(ip, originals_dir, None, paths.int_dir)
                 info = boost_int_file(ip, stem, backup_dir)
                 if info.get("skipped"):
                     _log(log, f"  {int_name}: 已加强过，跳过")
@@ -694,8 +906,13 @@ def main() -> int:
     )
     ap.add_argument("--no-int-boost", action="store_true")
     ap.add_argument("--check-only", action="store_true")
+    ap.add_argument("--restore", action="store_true", help="从备份还原修复前的文件")
+    ap.add_argument("--restore-from", type=Path, help="指定备份目录（默认用首次原件）")
     args = ap.parse_args()
     paths = GamePaths.resolve(args.game)
+    if args.restore or args.restore_from:
+        r = restore_from_backup(args.game, args.restore_from)
+        return 0 if r.ok else 1
     check_game(paths)
     if args.check_only:
         return 0
