@@ -1,0 +1,22 @@
+[project]
+name = "EchoCNFix"
+version = "1.0.0"
+authors = [{ name = "Light-milk-tea" }]
+description = """
+修复无主之地1重制版 DLC Echo / 旁白字幕被包内英文抢走的问题。
+启用后从天邈 Localization\\INT\\*.int 读取中文，写进已加载的 SoundNodeWave，
+可在游戏 MODS 菜单里随时开关。必须先安装天邈汉化 BGOTYECNv1.0fix。
+不修改 UPK，Steam 验证文件也不会把它还原。
+"""
+
+[project.urls]
+Homepage = "https://github.com/Light-milk-tea/Borderlands-Remastered-Echo-Missing-Localization-Fix-Tool"
+
+[project.dependencies]
+willow1_mod_manager = ">=1.0"
+
+[tool.sdkmod]
+name = "Echo CN Fix"
+license = {name = "MIT", url = "https://choosealicense.com/licenses/mit/"}
+supported_games = ["BL1E"]
+coop_support = "ClientSide"

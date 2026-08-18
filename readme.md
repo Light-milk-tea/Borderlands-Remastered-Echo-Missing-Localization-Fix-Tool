@@ -5,6 +5,24 @@
 我本来以为是汉化包没做这部分内容，但是经过了解，发现无主之地1原版反而可以成功汉化 dlc。  
 于是我开始查找导致这个 bug 的根源。
 
+## 推荐：游戏内 SDK 模组（可开关）
+
+如果你已经装了 [Willow1 Python SDK](https://bl-sdk.github.io/willow1-mod-db/)，用这个最省事：
+
+1. 先装好天邈汉化 `BGOTYECNv1.0fix`
+2. 把 `Echo_CN_Fix_SDK/echo_cn_fix.sdkmod` 丢进游戏目录的 `sdk_mods` 文件夹
+3. 启动游戏，主菜单进入 **MODS**，打开 **Echo CN Fix**
+4. 关掉模组即可还原英文包内字幕；再打开又变回中文
+
+它在运行时把天邈 `.int` 里的中文写进已加载的 `SoundNodeWave`，**不改 UPK**。  
+Steam「验证游戏文件」不会把它还原。联机时各自客户端装即可。
+
+想重新打包：`python Echo_CN_Fix_SDK/pack_sdkmod.py`
+
+没有 SDK、只想改文件的，继续用下面的便携版 exe。两种方式不要叠着用——若已经跑过 exe，想靠 MODS 菜单在中/英之间切换，请先在 exe 里「一键还原」。
+
+## 原因
+
 先核对了天邈的文件，发现中文其实早就在 `Localization\INT` 的 `.int` 里了，并不是漏译。  
 再对比原版和重制版同场景的资源，发现两边游戏读字幕的路径不一样。
 
