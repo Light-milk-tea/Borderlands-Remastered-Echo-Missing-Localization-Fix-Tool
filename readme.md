@@ -5,12 +5,23 @@
 我本来以为是汉化包没做这部分内容，但是经过了解，发现无主之地1原版反而可以成功汉化 dlc。  
 于是我开始查找导致这个 bug 的根源。
 
+## SDK 模组（统一目录）
+
+已经打好的 `.sdkmod` 都放在 [`sdkmod/`](sdkmod/)：
+
+| 文件 | 用途 |
+| --- | --- |
+| [`sdkmod/echo_cn_fix.sdkmod`](sdkmod/echo_cn_fix.sdkmod) | Echo / 旁白字幕汉化修复 |
+| [`sdkmod/bl1_dxvk_fix.sdkmod`](sdkmod/bl1_dxvk_fix.sdkmod) | 卡顿修复（DXVK） |
+
+朋友请优先从这里或 [Releases](https://github.com/Light-milk-tea/Borderlands-Remastered-Echo-Missing-Localization-Fix-Tool/releases) 取文件，不要用 Code → Download ZIP 当安装包。
+
 ## 推荐：游戏内 SDK 模组（可开关）
 
 如果你已经装了 [Willow1 Python SDK](https://bl-sdk.github.io/willow1-mod-db/)，用这个最省事：
 
 1. 先装好天邈汉化 `BGOTYECNv1.0fix`
-2. 把 `Echo_CN_Fix_SDK/echo_cn_fix.sdkmod` 丢进游戏目录的 `sdk_mods` 文件夹
+2. 把 [`sdkmod/echo_cn_fix.sdkmod`](sdkmod/echo_cn_fix.sdkmod) 丢进游戏目录的 `sdk_mods` 文件夹
 3. 启动游戏，主菜单进入 **MODS**，打开 **Echo CN Fix**
 4. 关掉模组即可还原英文包内字幕；再打开又变回中文
 
